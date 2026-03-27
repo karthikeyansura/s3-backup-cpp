@@ -15,10 +15,10 @@ _deps/
 *.out
 
 # Specific Binaries from CMakeLists.txt
-s3backup
-s3mount
-test_format
-test_backup
+/s3backup
+/s3mount
+/test_format
+/test_backup
 
 # Development & IDEs
 .idea/
