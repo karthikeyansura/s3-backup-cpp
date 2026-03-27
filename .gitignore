@@ -1,0 +1,31 @@
+# Build directories
+build/
+bin/
+cmake-build-*/
+
+# Dependencies & Cache
+.cache/
+_deps/
+
+# Compiled Files
+*.o
+*.a
+*.so
+*.dylib
+*.out
+
+# Specific Binaries from CMakeLists.txt
+s3backup
+s3mount
+test_format
+test_backup
+
+# Development & IDEs
+.idea/
+.vscode/
+compile_commands.json
+.DS_Store
+
+# Temporary Files
+/tmp/s3bu-cpp.*
+/tmp/s3mount-dc.*
