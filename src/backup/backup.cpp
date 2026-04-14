@@ -46,11 +46,11 @@ struct BackupState {
     }
 
     [[nodiscard]] bool is_excluded(const std::string& dir, const std::string& file) const {
-        std::string full = dir;
-        full += "/";
-        full += file;
+        std::string full = dir.empty() ? file : dir + "/" + file;
         return std::any_of(cfg.exclude.begin(), cfg.exclude.end(),
-                           [&full](const std::string& pat) { return pat == full; });
+                           [&](const std::string& pat) { 
+                               return pat == full || pat == file; 
+                           });
     }
 
     // Store a regular file
