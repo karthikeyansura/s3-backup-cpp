@@ -1,157 +1,203 @@
-// s3_store.cpp - S3 backend implementation using libcurl.
+// s3_store.cpp - S3 backend implementation using minio-cpp.
 #include "s3backup/store.h"
-#include <curl/curl.h>
+#include <miniocpp/client.h>
 #include <sstream>
 #include <stdexcept>
 #include <algorithm>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 namespace store {
 
 void StoreEnv::Initialize() {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
 }
 
 void StoreEnv::Cleanup() {
-    curl_global_cleanup();
 }
 
-namespace {
+struct MinioS3Context {
+    minio::s3::BaseUrl base_url;
+    minio::creds::StaticProvider provider;
+    minio::s3::Client client;
 
-size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    auto* buf = static_cast<std::vector<uint8_t>*>(userdata);
-    size_t bytes = size * nmemb;
-    buf->insert(buf->end(), reinterpret_cast<uint8_t*>(ptr), reinterpret_cast<uint8_t*>(ptr) + bytes);
-    return bytes;
-}
-
-size_t header_callback(const char* buffer, size_t size, size_t nitems, void* userdata) {
-    auto* content_length = static_cast<int64_t*>(userdata);
-    std::string line(buffer, size * nitems);
-    if (line.compare(0, 16, "Content-Length: ") == 0 ||
-        line.compare(0, 16, "content-length: ") == 0) {
-        try {
-            *content_length = std::stoll(line.substr(16));
-        } catch (...) {
-            // Parsing failed for Content-Length header.
-        }
+    MinioS3Context(const S3Config& cfg) 
+      : base_url(cfg.endpoint, cfg.use_ssl), 
+        provider(cfg.access_key, cfg.secret_key),
+        client(base_url, &provider) {
     }
-    return size * nitems;
-}
-
-std::string make_url(const S3Config& cfg, const std::string& key) {
-    std::string scheme = cfg.use_ssl ? "https" : "http";
-    return scheme + "://" + cfg.endpoint + "/" + cfg.bucket + "/" + key;
-}
-
-} // namespace
+};
 
 S3Store::S3Store(S3Config cfg) : cfg_(std::move(cfg)) {}
 
 std::vector<uint8_t> S3Store::get_range(const std::string& key, int64_t offset, int64_t length) {
-    CURL* curl = curl_easy_init();
-    if (curl == nullptr) throw std::runtime_error("store: curl init failed");
+    MinioS3Context ctx(cfg_);
 
-    std::string url = make_url(cfg_, key);
-    std::string range = std::to_string(offset) + "-" + std::to_string(offset + length - 1);
-
+    minio::s3::GetObjectArgs args;
+    args.bucket = cfg_.bucket;
+    args.object = key;
+    args.extra_headers.Add("Range", "bytes=" + std::to_string(offset) + "-" + std::to_string(offset + length - 1));
+    
     std::vector<uint8_t> buf;
-    buf.reserve(static_cast<size_t>(length));
+    args.datafunc = [&buf](minio::http::DataFunctionArgs dargs) -> bool {
+        buf.insert(buf.end(), dargs.datachunk.begin(), dargs.datachunk.end());
+        return true;
+    };
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-
-    if (!cfg_.access_key.empty()) {
-        std::string userpwd = cfg_.access_key + ":" + cfg_.secret_key;
-        curl_easy_setopt(curl, CURLOPT_USERPWD, userpwd.c_str());
+    minio::s3::GetObjectResponse resp = ctx.client.GetObject(args);
+    if (!resp) {
+        throw std::runtime_error("store: minio GET failed: " + resp.Error().String());
     }
-
-    CURLcode res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK)
-        throw std::runtime_error(std::string("store: curl GET failed: ") + curl_easy_strerror(res));
-
+    
     return buf;
 }
 
 int64_t S3Store::size(const std::string& key) {
-    CURL* curl = curl_easy_init();
-    if (curl == nullptr) throw std::runtime_error("store: curl init failed");
+    MinioS3Context ctx(cfg_);
 
-    std::string url = make_url(cfg_, key);
-    int64_t content_length = 0;
+    minio::s3::StatObjectArgs args;
+    args.bucket = cfg_.bucket;
+    args.object = key;
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &content_length);
-
-    if (!cfg_.access_key.empty()) {
-        std::string userpwd = cfg_.access_key + ":" + cfg_.secret_key;
-        curl_easy_setopt(curl, CURLOPT_USERPWD, userpwd.c_str());
+    minio::s3::StatObjectResponse resp = ctx.client.StatObject(args);
+    if (!resp) {
+        throw std::runtime_error("store: minio HEAD failed: " + resp.Error().String());
     }
 
-    CURLcode res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK)
-        throw std::runtime_error(std::string("store: curl HEAD failed: ") + curl_easy_strerror(res));
-
-    return content_length;
+    return static_cast<int64_t>(resp.size);
 }
+
+class PipeStreamBuf : public std::streambuf {
+public:
+    PipeStreamBuf() : eof_(false) {}
+
+    void write(const uint8_t* data, size_t len) {
+        std::unique_lock<std::mutex> lock(mu_);
+        buf_.insert(buf_.end(), data, data + len);
+        cv_.notify_all();
+    }
+
+    void finish() {
+        std::unique_lock<std::mutex> lock(mu_);
+        eof_ = true;
+        cv_.notify_all();
+    }
+    
+    void throw_if_error(std::exception_ptr e) {
+        std::unique_lock<std::mutex> lock(mu_);
+        err_ = e;
+        cv_.notify_all();
+    }
+
+protected:
+    int underflow() override {
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait(lock, [this]() { return !buf_.empty() || eof_ || err_; });
+        
+        if (err_) std::rethrow_exception(err_);
+        if (buf_.empty() && eof_) return traits_type::eof();
+
+        setg(reinterpret_cast<char*>(buf_.data()), 
+             reinterpret_cast<char*>(buf_.data()), 
+             reinterpret_cast<char*>(buf_.data() + buf_.size()));
+        return traits_type::to_int_type(*gptr());
+    }
+
+    int uflow() override {
+        int ret = underflow();
+        if (ret != traits_type::eof()) {
+            buf_.erase(buf_.begin());
+        }
+        return ret;
+    }
+    
+    std::streamsize xsgetn(char* s, std::streamsize n) override {
+        std::streamsize remaining = n;
+        char* dest = s;
+        while (remaining > 0) {
+            std::unique_lock<std::mutex> lock(mu_);
+            cv_.wait(lock, [this]() { return !buf_.empty() || eof_ || err_; });
+            
+            if (err_) std::rethrow_exception(err_);
+            if (buf_.empty() && eof_) break;
+            
+            size_t avail = buf_.size();
+            size_t copy_size = std::min(static_cast<size_t>(remaining), avail);
+            
+            std::memcpy(dest, buf_.data(), copy_size);
+            buf_.erase(buf_.begin(), buf_.begin() + copy_size);
+            
+            dest += copy_size;
+            remaining -= static_cast<std::streamsize>(copy_size);
+        }
+        return n - remaining;
+    }
+
+
+private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::vector<uint8_t> buf_;
+    bool eof_;
+    std::exception_ptr err_;
+};
 
 class S3Writer : public ObjectStore::Writer {
 public:
     S3Writer(S3Config cfg, std::string key)
-        : cfg_(std::move(cfg)), key_(std::move(key)), read_offset_(0) {}
+        : ctx_(std::make_unique<MinioS3Context>(cfg)), key_(std::move(key)), pipe_(), stream_(&pipe_) {
+        // Run Minio backend in thread while the frontend writes blocks.
+        // To avoid storing everything in memory, minio client reads from stream.
+        S3Config thread_cfg = cfg;
+        std::string thread_key = key_;
+        
+        uploader_ = std::thread([this, thread_cfg, thread_key]() {
+            try {
+                minio::s3::PutObjectArgs args(stream_, -1, 5 * 1024 * 1024);
+                args.bucket = thread_cfg.bucket;
+                args.object = thread_key;
+                
+                minio::s3::PutObjectResponse resp = ctx_->client.PutObject(args);
+                if (!resp) {
+                    pipe_.throw_if_error(std::make_exception_ptr(
+                        std::runtime_error("minio PUT failed: " + resp.Error().String())));
+                } else {
+                    res_err_ = "";
+                }
+            } catch (const std::exception& e) {
+                res_err_ = e.what();
+            }
+        });
+    }
+    
+    ~S3Writer() {
+        if (uploader_.joinable()) {
+            pipe_.finish();
+            uploader_.join();
+        }
+    }
 
     void write(const uint8_t* data, size_t len) override {
-        buf_.insert(buf_.end(), data, data + len);
+        if (len > 0) {
+            pipe_.write(data, len);
+        }
     }
 
     void close() override {
-        CURL* curl = curl_easy_init();
-        if (curl == nullptr) throw std::runtime_error("store: curl init failed");
-
-        std::string url = make_url(cfg_, key_);
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
-        curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(buf_.size()));
-
-        read_offset_ = 0;
-        curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_cb);
-        curl_easy_setopt(curl, CURLOPT_READDATA, this);
-
-        if (!cfg_.access_key.empty()) {
-            std::string userpwd = cfg_.access_key + ":" + cfg_.secret_key;
-            curl_easy_setopt(curl, CURLOPT_USERPWD, userpwd.c_str());
+        pipe_.finish();
+        if (uploader_.joinable()) uploader_.join();
+        if (!res_err_.empty()) {
+            throw std::runtime_error(res_err_);
         }
-
-        CURLcode res = curl_easy_perform(curl);
-        curl_easy_cleanup(curl);
-
-        if (res != CURLE_OK)
-            throw std::runtime_error(std::string("store: curl PUT failed: ") + curl_easy_strerror(res));
     }
 
 private:
-    static size_t read_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
-        auto* self = static_cast<S3Writer*>(userdata);
-        size_t remaining = self->buf_.size() - self->read_offset_;
-        size_t to_copy = std::min(size * nmemb, remaining);
-        if (to_copy > 0) {
-            std::memcpy(ptr, self->buf_.data() + self->read_offset_, to_copy);
-            self->read_offset_ += to_copy;
-        }
-        return to_copy;
-    }
-
-    S3Config cfg_;
-    std::string key_;
-    std::vector<uint8_t> buf_;
-    size_t read_offset_;
+   std::unique_ptr<MinioS3Context> ctx_;
+   std::string key_;
+   PipeStreamBuf pipe_;
+   std::istream stream_;
+   std::thread uploader_;
+   std::string res_err_;
 };
 
 std::unique_ptr<ObjectStore::Writer> S3Store::new_writer(const std::string& key) {
