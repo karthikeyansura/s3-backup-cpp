@@ -38,7 +38,7 @@ target_include_directories(s3fs PUBLIC include)
 
 # Library: store
 add_library(s3store STATIC
-        src/store/store.cpp src/store/local_store.cpp src/store/s3_store.cpp)
+        src/store/local_store.cpp src/store/s3_store.cpp)
 target_include_directories(s3store PUBLIC include)
 target_link_libraries(s3store PUBLIC s3fs CURL::libcurl miniocpp::miniocpp OpenSSL::SSL OpenSSL::Crypto)
 

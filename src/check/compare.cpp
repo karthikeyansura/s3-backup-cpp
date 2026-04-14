@@ -6,7 +6,7 @@
 #include <sstream>
 #include <fstream>
 #include <unordered_map>
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include <iomanip>
 #include <algorithm>
 
@@ -29,21 +29,25 @@ static std::string hash_local_file(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) return "";
     
-    SHA256_CTX ctx;
-    SHA256_Init(&ctx);
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return "";
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+    
     char buf[32768];
     while (file.read(buf, sizeof(buf))) {
-        SHA256_Update(&ctx, buf, file.gcount());
+        EVP_DigestUpdate(ctx, buf, file.gcount());
     }
     if (file.gcount() > 0) {
-        SHA256_Update(&ctx, buf, file.gcount());
+        EVP_DigestUpdate(ctx, buf, file.gcount());
     }
     
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_Final(hash, &ctx);
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hash_len = 0;
+    EVP_DigestFinal_ex(ctx, hash, &hash_len);
+    EVP_MD_CTX_free(ctx);
     
     std::stringstream ss;
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+    for (unsigned int i = 0; i < hash_len; i++) {
         ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
     }
     return ss.str();
@@ -58,24 +62,27 @@ static std::string hash_backup_file(s3mount::MountState& arch, const s3fs::Diren
     int64_t remaining = de.bytes;
     int64_t cur = base_offset;
     
-    SHA256_CTX ctx;
-    SHA256_Init(&ctx);
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return "";
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
     
     const int64_t chunk_size = 4 * 1024 * 1024;
     while (remaining > 0) {
         int64_t n = std::min(remaining, chunk_size);
         auto data = arch.store->get_range(key, cur, n);
         if (data.empty()) break;
-        SHA256_Update(&ctx, data.data(), data.size());
+        EVP_DigestUpdate(ctx, data.data(), data.size());
         cur += static_cast<int64_t>(data.size());
         remaining -= static_cast<int64_t>(data.size());
     }
     
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_Final(hash, &ctx);
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hash_len = 0;
+    EVP_DigestFinal_ex(ctx, hash, &hash_len);
+    EVP_MD_CTX_free(ctx);
     
     std::stringstream ss;
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+    for (unsigned int i = 0; i < hash_len; i++) {
         ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
     }
     return ss.str();
