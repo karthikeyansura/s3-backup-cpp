@@ -103,7 +103,7 @@ cmake --build . -j $(nproc)
 ./build/test_format
 ./build/test_backup
 
-# Local and S3 integration tests (56 assertions, identical layout to previous Go tests)
+# Local and S3 integration tests (56 assertions, comprehensive functional equivalence)
 chmod +x test_local.sh
 ./test_local.sh
 
