@@ -1,31 +1,38 @@
-# Build directories
+# CMake build directories
+cmake-build-debug/
+cmake-build-release/
 build/
-bin/
-cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+*.cmake
 
-# Dependencies & Cache
-.cache/
-_deps/
-
-# Compiled Files
-*.o
-*.a
-*.so
-*.dylib
-*.out
-
-# Specific Binaries from CMakeLists.txt
+# Compiled binaries
 /s3backup
 /s3mount
-/test_format
-/test_backup
+/s3check
 
-# Development & IDEs
+# Cloned dependencies
+vcpkg/
+minio-cpp/
+
+# macOS / IDE specific
+.DS_Store
 .idea/
 .vscode/
-compile_commands.json
-.DS_Store
 
-# Temporary Files
-/tmp/s3bu-cpp.*
-/tmp/s3mount-dc.*
+# Compilation database for IDEs
+compile_commands.json
+
+# Test backups / images
+*.img
+t1.img
+t7.img
+t8.img
+test_mount_data/
+/tmp/s3bu-dirdata-*
+/tmp/s3mount-dircache-*
+
+# Environment Files (Credentials)
+.env
+.env.local

@@ -1,102 +1,81 @@
 # S3 Incremental Backup and FUSE Client — C++ Implementation
 
-**s3backup** performs a full or incremental backup of a directory hierarchy to a single S3 object; **s3mount** mounts a backup as a read-only FUSE file system.
+**s3backup** performs a full or incremental backup of a directory hierarchy to a single S3 object; **s3mount** mounts a backup as a read-only FUSE file system; **s3check** validates backup integrity and compares backups against source trees.
 
-This implementation is a ground-up port of [pjd-nu/s3-backup](https://github.com/pjd-nu/s3-backup) from C to modern C++17, replacing the unmaintained `libs3` library with a minimal libcurl-based S3 client (swappable for minio-cpp or the AWS SDK), eliminating `libavl` in favor of `std::unordered_map`, and implementing the mmap-based directory cache optimization described in the original project's cleanup notes.
+This is a modern C++17 port of the original [pjd-nu/s3-backup](https://github.com/pjd-nu/s3-backup) project. It replaces the unmaintained `libs3` with the official **[MinIO C++ SDK (`minio-cpp`)](https://github.com/minio/minio-cpp)**, and entirely eliminates the Out-Of-Memory (OOM) footprint that previously choked the C-based FUSE daemon on large datasets. The C++ implementation features a highly-optimized pipelined streaming layout for S3 multipart uploads. 
 
-The on-disk binary format is fully preserved — backups created by any of the C, Go, or C++ versions can be mounted by any other.
+The on-disk binary format is fully preserved — backups created by either the C version, Go version, or this C++ version can be mounted interchangeably.
 
 Original project by Peter Desnoyers, Northeastern University, Solid-State Storage Lab.
 
-## Building
+## Quick Start / Build Guide
 
-Requires CMake 3.20+ and a C++17 compiler. The only system dependency is libcurl (present on macOS and most Linux distributions by default).
+This project leverages modern CMake (`>= 3.20`) and relies on standard macOS environments to pull dependencies.
+
+### 1. Install Dependencies (macOS)
+The dependencies are natively sourced via Homebrew instead of utilizing heavy Windows-based package managers like `vcpkg`.
+
+First, ensure you have Homebrew installed, then run:
+```bash
+brew install cmake nlohmann-json pugixml curlpp inih openssl zlib
+```
+
+*Note: For mounting capabilities using `s3mount`, you must also have macOS `FUSE-T` (or `macFUSE`) installed.*
+
+### 2. Build the Project
+Configure and compile the project using standard CMake tools. Building forces an out-of-source structure ensuring safety.
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake -B cmake-build-debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build cmake-build-debug -j 4
 ```
 
-To skip building `s3mount` (avoids the FUSE dependency):
-
-```bash
-cmake -B build -DBUILD_MOUNT=OFF
-cmake --build build
-```
-
-### Running Tests
-
-```bash
-cd build
-ctest --output-on-failure
-```
-
-Or run directly:
-
-```bash
-./build/test_format     # binary format round-trip tests
-./build/test_backup     # end-to-end backup + verification (local mode)
-```
-
-### macOS Notes
-
-- `s3backup` works without any extra dependencies.
-- `s3mount` requires [FUSE-T](https://github.com/macos-fuse-t/fuse-t) (`brew install fuse-t fuse-t-lib`).
-- UUID generation uses the system `uuid/uuid.h` (available in both macOS and `libuuid-dev` on Linux).
-
-## What Changed from the C Version
-
-| Component | C Original | C++ Implementation |
-|-----------|-----------|-------------------|
-| S3 library | libs3 (unmaintained, required 64-bit patch) | libcurl (minimal S3 client; swappable for minio-cpp / AWS SDK) |
-| Map / tree | libavl | `std::unordered_map` |
-| Directory cache | In-memory heap buffers | mmap'd temp file (zero-copy lookups) |
-| Data cache | Fixed 16-entry LRU, 16 MiB blocks | Same algorithm, `std::mutex`-protected |
-| CLI parsing | argp | CLI11 (header-only, fetched via CMake FetchContent) |
-| UUID | libuuid (C) | libuuid (same, via `uuid/uuid.h`) |
-| Build system | Makefile + manual deps | CMake with FetchContent |
-| Platform compat | `#ifdef` / gcc attributes | `#ifdef PLATFORM_DARWIN` / `PLATFORM_LINUX` |
-
-## Project Structure
-
-```
-include/s3backup/   Public headers (format.h, superblock.h, store.h, backup.h, mount.h)
-src/s3fs/           On-disk format: packed struct serialization, dirent/version iteration
-src/store/          ObjectStore interface with S3 (libcurl) and local file backends
-src/backup/         Backup engine: directory traversal, incremental diffing, sector-aligned I/O
-src/mount/          FUSE filesystem, mmap-based directory cache, LRU data block cache
-tests/              Format round-trip tests and end-to-end backup test
-```
+> **IDE Warnings / Setup Notice**: 
+> If you are using CLion or VSCode (with clangd) and see red lines or auto-completion failures due to missing includes, the `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` flag fixes this! It generates a `compile_commands.json` file inside `cmake-build-debug/`. You can copy or symlink this back to your project root `ln -s cmake-build-debug/compile_commands.json .` letting your IDE seamlessly resolve the `<miniocpp/client.h>` and `OpenSSL` headers.
 
 ## Usage
 
+Environment variables: `S3_HOSTNAME`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`
+(Alternatively available as command-line flags).
+
+After building, the binaries will be located inside the `cmake-build-debug` directory.
+
 ```bash
-# Full backup (local mode — no S3 needed)
-./build/s3backup --bucket unused --local backup.img /path/to/dir
-
-# Full backup to S3
-export S3_HOSTNAME=play.min.io
-export S3_ACCESS_KEY_ID=...
-export S3_SECRET_ACCESS_KEY=...
-./build/s3backup --bucket mybucket backup-2024-01-01 /home/user
-
-# Incremental backup
-./build/s3backup --bucket mybucket --incremental backup-2024-01-01 backup-2024-01-02 /home/user
-
-# Mount (requires FUSE)
-mkdir /mnt/backup
-./build/s3mount --local backup.img /mnt/backup
+./cmake-build-debug/s3backup --bucket BUCKET [--incremental OBJECT] [--max SIZE] [--exclude PATH] OBJECT /path
+./cmake-build-debug/s3mount  [--local] bucket/key /mountpoint
+./cmake-build-debug/s3check  fsck [--local] TARGET
+./cmake-build-debug/s3check  diff [--local] TARGET DIRECTORY
 ```
 
-## Binary Format Compatibility
+## Description
 
-The C++ implementation reads and writes the exact same binary format as the original C version. All multi-byte integers are little-endian. Structures are serialized field-by-field with explicit `memcpy` to avoid alignment padding — no `#pragma pack` or `__attribute__((packed))` is used in the C++ code; instead, portable serialization functions handle the byte layout.
+`s3backup` stores a snapshot of a file system as a single S3 object, using a simplified log-structured file system with 512-byte sectors. It supports incremental backups by chaining a sequence of these objects — each incremental backup stores only files whose metadata (mode, size, ctime, uid, gid) has changed since the previous version.
 
-## Dependencies
+The FUSE client (`s3mount`) aggressively caches data and directories, stores symbolic links, and preserves owners, timestamps, and permissions. Directory metadata is cached via `mmap` on a temporary file rather than held in heap memory, allowing the OS to page it in and out as needed — significantly reducing resident memory for large datasets.
 
-| Dependency | Purpose | Source                                                           |
-|-----------|---------|------------------------------------------------------------------|
-| libcurl | S3 HTTP operations (GET range, HEAD, PUT) | System package                                                   |
-| CLI11 | Command-line parsing | CMake FetchContent                                               |
-| libuuid | UUID generation | System (`uuid/uuid.h`)                                           |
-| FUSE-T / libfuse | FUSE mount (optional) | `brew install fuse-t fuse-t-lib` (macOS) / `libfuse-dev` (Linux) |
+### Traversal Semantics
+
+During the backup procedure, the directory tree traversal handles these complex edge-cases:
+
+- **Symbolic links**: restored faithfully on mount via FUSE `Readlink`.
+- **Cross-device mount points**: detected by comparing `st_dev` of child directories against the parent. Unmounted devices are stored as empty entries.
+- **FIFOs**: skipped entirely to avoid blocking the daemon traversing thread.
+
+### Features
+
+- S3 hostname, access key, and secret key can be provided by flags (`--hostname`) as well as environment variables.
+- The `--local` flag forces object paths to be interpreted as local filesystem paths—essential for offline debugging or unit testing without an external S3 bucket API.
+- Native multithreaded `minio-cpp` bindings completely sidestep memory bloat by buffering and flushing S3 chunks concurrently.
+- Highly resilient `diff` and `fsck` utilities that provide deep algorithmic insights and consistency evaluations.
+
+## Running Tests
+
+Integration and Unit Test scripts ported natively from the original implementations run directly off the generated bins using local test mounts.
+
+```bash
+# Validates incremental tracking, sector alignments, exclusions, and file diffing.
+./test_local.sh
+
+# Builds sandbox trees and FUSE mounts them checking block translations.
+./test_mount.sh
+```
