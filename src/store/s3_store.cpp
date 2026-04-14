@@ -37,7 +37,12 @@ std::vector<uint8_t> S3Store::get_range(const std::string& key, int64_t offset, 
     minio::s3::GetObjectArgs args;
     args.bucket = cfg_.bucket;
     args.object = key;
-    args.extra_headers.Add("Range", "bytes=" + std::to_string(offset) + "-" + std::to_string(offset + length - 1));
+    
+    // Memory remains valid synchronously during GetObject()
+    size_t off = offset;
+    size_t len = length;
+    args.offset = &off;
+    args.length = &len;
     
     std::vector<uint8_t> buf;
     args.datafunc = [&buf](minio::http::DataFunctionArgs dargs) -> bool {
@@ -48,6 +53,10 @@ std::vector<uint8_t> S3Store::get_range(const std::string& key, int64_t offset, 
     minio::s3::GetObjectResponse resp = ctx.client.GetObject(args);
     if (!resp) {
         throw std::runtime_error("store: minio GET failed: " + resp.Error().String());
+    }
+    
+    if (buf.size() != static_cast<size_t>(length)) {
+        throw std::runtime_error("store: minio GET returned truncated data (" + std::to_string(buf.size()) + " != " + std::to_string(length) + ")");
     }
     
     return buf;
@@ -154,7 +163,7 @@ public:
         
         uploader_ = std::thread([this, thread_cfg, thread_key]() {
             try {
-                minio::s3::PutObjectArgs args(stream_, -1, 5 * 1024 * 1024);
+                minio::s3::PutObjectArgs args(stream_, -1, 16 * 1024 * 1024);
                 args.bucket = thread_cfg.bucket;
                 args.object = thread_key;
                 
