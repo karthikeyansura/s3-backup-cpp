@@ -20,6 +20,7 @@ minio-cpp/
 .DS_Store
 .idea/
 .vscode/
+.cache/
 
 # Compilation database for IDEs
 compile_commands.json
