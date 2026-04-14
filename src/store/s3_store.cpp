@@ -7,6 +7,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <deque>
 
 namespace store {
 
@@ -97,18 +98,19 @@ protected:
         if (err_) std::rethrow_exception(err_);
         if (buf_.empty() && eof_) return traits_type::eof();
 
-        setg(reinterpret_cast<char*>(buf_.data()), 
-             reinterpret_cast<char*>(buf_.data()), 
-             reinterpret_cast<char*>(buf_.data() + buf_.size()));
-        return traits_type::to_int_type(*gptr());
+        return traits_type::to_int_type(buf_.front());
     }
 
     int uflow() override {
-        int ret = underflow();
-        if (ret != traits_type::eof()) {
-            buf_.erase(buf_.begin());
-        }
-        return ret;
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait(lock, [this]() { return !buf_.empty() || eof_ || err_; });
+        
+        if (err_) std::rethrow_exception(err_);
+        if (buf_.empty() && eof_) return traits_type::eof();
+
+        uint8_t val = buf_.front();
+        buf_.pop_front();
+        return traits_type::to_int_type(val);
     }
     
     std::streamsize xsgetn(char* s, std::streamsize n) override {
@@ -124,7 +126,7 @@ protected:
             size_t avail = buf_.size();
             size_t copy_size = std::min(static_cast<size_t>(remaining), avail);
             
-            std::memcpy(dest, buf_.data(), copy_size);
+            std::copy(buf_.begin(), buf_.begin() + copy_size, dest);
             buf_.erase(buf_.begin(), buf_.begin() + copy_size);
             
             dest += copy_size;
@@ -133,11 +135,10 @@ protected:
         return n - remaining;
     }
 
-
 private:
     std::mutex mu_;
     std::condition_variable cv_;
-    std::vector<uint8_t> buf_;
+    std::deque<uint8_t> buf_;
     bool eof_;
     std::exception_ptr err_;
 };
