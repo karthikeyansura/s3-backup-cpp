@@ -23,7 +23,14 @@ FetchContent_Declare(cli11
         GIT_TAG v2.4.2)
 FetchContent_MakeAvailable(cli11)
 
+# macOS Homebrew prefix hint for dependencies
+if(APPLE)
+    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+endif()
+
 find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED)
+add_subdirectory(minio-cpp)
 
 # Library: s3fs (format)
 add_library(s3fs STATIC src/s3fs/format.cpp src/s3fs/superblock.cpp)
@@ -33,7 +40,7 @@ target_include_directories(s3fs PUBLIC include)
 add_library(s3store STATIC
         src/store/store.cpp src/store/local_store.cpp src/store/s3_store.cpp)
 target_include_directories(s3store PUBLIC include)
-target_link_libraries(s3store PUBLIC s3fs CURL::libcurl)
+target_link_libraries(s3store PUBLIC s3fs CURL::libcurl miniocpp::miniocpp OpenSSL::SSL OpenSSL::Crypto)
 
 # Library: backup
 add_library(s3backup_lib STATIC src/backup/backup.cpp src/backup/writer.cpp)
@@ -43,6 +50,11 @@ target_link_libraries(s3backup_lib PUBLIC s3fs s3store)
 # Executable: s3backup
 add_executable(s3backup src/backup/main.cpp)
 target_link_libraries(s3backup PRIVATE s3backup_lib CLI11::CLI11)
+
+# Executable: s3check
+add_executable(s3check src/check/main.cpp src/check/fsck.cpp src/check/compare.cpp)
+target_include_directories(s3check PRIVATE include)
+target_link_libraries(s3check PRIVATE s3mount_lib s3backup_lib s3store s3fs CLI11::CLI11 OpenSSL::Crypto minio-cpp::miniocpp)
 
 # Executable: s3mount
 if(BUILD_MOUNT)
