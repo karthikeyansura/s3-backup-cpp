@@ -1,4 +1,4 @@
-# S3 Incremental Backup and FUSE Client — C++ Implementation
+# S3 Incremental Backup and FUSE Client
 
 **s3backup** performs a full or incremental backup of a directory hierarchy to a single S3 object; **s3mount** mounts a backup as a read-only FUSE file system; **s3check** validates backup integrity and compares backups against source trees.
 
